@@ -1,0 +1,245 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import csv
+import copy
+import argparse
+import itertools
+from collections import Counter
+from collections import deque
+
+import cv2 as cv
+import numpy as np
+import mediapipe as mp
+
+from utils import CvFpsCalc
+from model import KeyPointClassifier
+from model import PointHistoryClassifier
+
+
+def calc_bounding_rect(image, landmarks):
+    image_width, image_height = image.shape[1], image.shape[0]
+
+    landmark_array = np.empty((0, 2), int)
+
+    for _, landmark in enumerate(landmarks.landmark):
+        landmark_x = min(int(landmark.x * image_width), image_width - 1)
+        landmark_y = min(int(landmark.y * image_height), image_height - 1)
+
+        landmark_point = [np.array((landmark_x, landmark_y))]
+
+        landmark_array = np.append(landmark_array, landmark_point, axis=0)
+
+    x, y, w, h = cv.boundingRect(landmark_array)
+
+    if (w > 250 and h > 350):
+        print("Move Back")
+    elif (w < 100 and h < 150):
+        print("Come closer")
+    else:
+        if x >= 150 and x <= 250 and y >= 100 and y <= 200:
+            print("No Movement")
+        elif y < 100:
+            print("Forward Movement")
+        elif y > 200:
+            print("Backward Movement")
+        elif x < 150 and y >= 100 and y <= 200:
+            print("Left side Movement")
+        elif x > 250 and y >= 100 and y <= 200:
+            print("Right side Movement")
+    
+    return [(x, y), (x + w, y + h)]
+
+
+def draw_no_movement_box(image):
+    image_height, image_width = image.shape[:2]
+    box_width = int(image_width * 0.3)
+    box_height = int(image_height * 0.3)
+    left = int((image_width - box_width) / 2)
+    top = int((image_height - box_height) / 2)
+    right = left + box_width
+    bottom = top + box_height
+    cv.rectangle(image, (left, top), (right, bottom), (0, 255, 0), 2)
+    cv.putText(image, 'No Movement', (left, top - 10),
+               cv.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+    return image
+
+
+def get_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--width", help='cap width', type=int, default=960)
+    parser.add_argument("--height", help='cap height', type=int, default=540)
+
+    parser.add_argument('--use_static_image_mode', action='store_true')
+    parser.add_argument("--min_detection_confidence",
+                        help='min_detection_confidence',
+                        type=float,
+                        default=0.7)
+    parser.add_argument("--min_tracking_confidence",
+                        help='min_tracking_confidence',
+                        type=int,
+                        default=0.5)
+
+    args = parser.parse_args()
+
+    return args
+
+
+def main():
+    # Argument parsing #################################################################
+    args = get_args()
+
+    cap_device = args.device
+    cap_width = args.width
+    cap_height = args.height
+
+    use_static_image_mode = args.use_static_image_mode
+    min_detection_confidence = args.min_detection_confidence
+    min_tracking_confidence = args.min_tracking_confidence
+
+    use_brect = True
+
+    # Camera preparation ###############################################################
+    cap = cv.VideoCapture(cap_device)
+    cap.set(cv.CAP_PROP_FRAME_WIDTH, cap_width)
+    cap.set(cv.CAP_PROP_FRAME_HEIGHT, cap_height)
+
+    # Model load #############################################################
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        static_image_mode=use_static_image_mode,
+        max_num_hands=1,
+        min_detection_confidence=min_detection_confidence,
+        min_tracking_confidence=min_tracking_confidence,
+    )
+
+    keypoint_classifier = KeyPointClassifier()
+
+    point_history_classifier = PointHistoryClassifier()
+
+    # Read labels ###########################################################
+    with open('model/keypoint_classifier/keypoint_classifier_label.csv',
+              encoding='utf-8-sig') as f:
+        keypoint_classifier_labels = csv.reader(f)
+        keypoint_classifier_labels = [
+            row[0] for row in keypoint_classifier_labels
+        ]
+    with open(
+            'model/point_history_classifier/point_history_classifier_label.csv',
+            encoding='utf-8-sig') as f:
+        point_history_classifier_labels = csv.reader(f)
+        point_history_classifier_labels = [
+            row[0] for row in point_history_classifier_labels
+        ]
+
+    # FPS Measurement ########################################################
+    cvFpsCalc = CvFpsCalc(buffer_len=10)
+
+    # Coordinate history #################################################################
+    history_length = 16
+    point_history = deque(maxlen=history_length)
+
+    # Buffer preparation #################################################################
+    bboxes_buffer = deque(maxlen=history_length)
+    actions_buffer = deque(maxlen=history_length)
+    action_counter = Counter()
+
+    while True:
+        # Keyboard detection #############################################################
+        key = cv.waitKey(1)
+        if key == 27:  # when ESC key is pressed break
+            break
+
+        # Capture frame ################################################################
+        ret, image = cap.read()
+        if not ret:
+            break
+        debug_image = copy.deepcopy(image)
+
+        # Detection implementation ######################################################
+        image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
+        image.flags.writeable = False
+        results = hands.process(image)
+
+        # Draw landmarks ################################################################
+        image_height, image_width, _ = image.shape
+        debug_image.flags.writeable = True
+        debug_image = cv.cvtColor(debug_image, cv.COLOR_RGB2BGR)
+
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                if use_brect:
+                    brect = calc_bounding_rect(debug_image, hand_landmarks)
+                    cv.rectangle(debug_image, brect[0], brect[1], (255, 0, 0),
+                                 2, cv.LINE_AA)
+                    debug_image = cv.rectangle(debug_image, brect[0], brect[1],
+                                               (255, 0, 0), 2, cv.LINE_AA)
+
+                landmark_point = []
+                for _, landmark in enumerate(hand_landmarks.landmark):
+                    x = min(int(landmark.x * image_width), image_width - 1)
+                    y = min(int(landmark.y * image_height), image_height - 1)
+                    z = landmark.z
+                    landmark_point.append((x, y, z))
+
+                    debug_image = cv.circle(debug_image, (x, y), 5,
+                                              (0, 0, 255), 10,
+                                              cv.FILLED, cv.LINE_AA)
+
+                # Storing keypoints in a buffer for later classification
+                keypoints = []
+                for point in landmark_point:
+                    keypoints.extend(point)
+                point_history.append(keypoints)
+
+                # Classifying keypoints
+                if len(point_history) == history_length:
+                    keypoints_action = keypoint_classifier.predict(
+                        np.array(point_history).reshape(1, -1))
+                    action = keypoint_classifier_labels[keypoints_action[0]]
+
+                    bboxes_buffer.append(brect)
+                    actions_buffer.append(action)
+
+                    if len(bboxes_buffer) == history_length:
+                        unique_actions = set(actions_buffer)
+
+                        # If there are multiple actions in the buffer, count the most frequent one
+                        if len(unique_actions) > 1:
+                            for unique_action in unique_actions:
+                                action_counter[unique_action] = actions_buffer.count(unique_action)
+
+                            action = action_counter.most_common(1)[0][0]
+                        else:
+                            action = actions_buffer[0]
+
+                        # Drawing bounding box and action label
+                        cv.rectangle(debug_image, brect[0], brect[1], (0, 255, 0),
+                                     2, cv.LINE_AA)
+                        debug_image = cv.putText(debug_image, action, (brect[0][0], brect[0][1] - 10),
+                                                    cv.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+
+                # Drawing action history
+                for i, text in enumerate(reversed(actions_buffer)):
+                    debug_image = cv.putText(debug_image, text, (10, 40 + i * 30),
+                                                cv.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+
+        else:
+            # If no hand is detected, draw a "No Movement" box
+            debug_image = draw_no_movement_box(debug_image)
+
+        # Calculate and display FPS ####################################################
+        fps = cvFpsCalc.get()
+        cv.putText(debug_image, f'FPS: {fps:.2f}', (10, 30),
+                   cv.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv.LINE_AA)
+
+        # Show image ###################################################################
+        cv.imshow('MediaPipe Hand Gesture Recognition', debug_image)
+
+    cap.release()
+    cv.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    main()

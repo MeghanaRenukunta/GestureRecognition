@@ -1,0 +1,44 @@
+import cv2
+
+# Define the boundary coordinates (top-left and bottom-right points)
+boundary_tl = (100, 100)  # Top-left coordinates of the boundary
+boundary_br = (400, 400)  # Bottom-right coordinates of the boundary
+
+# Create a video capture object
+cap = cv2.VideoCapture(0)
+
+while True:
+    # Read a frame from the video capture
+    ret, frame = cap.read()
+
+    if not ret:
+        break
+
+    # Draw the boundary rectangle on the frame
+    cv2.rectangle(frame, boundary_tl, boundary_br, (0, 255, 0), 2)
+
+    # Get the hand region of interest (ROI) within the boundary
+    hand_roi = frame[boundary_tl[1]:boundary_br[1], boundary_tl[0]:boundary_br[0]]
+
+    # Calculate the center of the palm within the boundary
+    palm_x = (boundary_tl[0] + boundary_br[0]) // 2
+    palm_y = (boundary_tl[1] + boundary_br[1]) // 2
+    palm_center = (palm_x, palm_y)
+
+    # Draw a circle at the center of the palm
+    cv2.circle(frame, palm_center, 5, (0, 0, 255), -1)
+
+    # Display the frame with the boundary and palm center
+    cv2.imshow('Hand Boundary', frame)
+
+    # Check if any hand pixels are outside the boundary
+    if cv2.countNonZero(cv2.inRange(hand_roi, (0, 0, 0), (255, 255, 255))) > 0:
+        print("Hand is outside the boundary!")
+
+    # Break the loop if 'q' is pressed
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Release the video capture object and close windows
+cap.release()
+cv2.destroyAllWindows()
